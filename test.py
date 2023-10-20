@@ -1,0 +1,335 @@
+import numpy as np
+import esutil as eu
+import fitsio
+import ngmix
+import galsim
+import argparse
+from tqdm import trange
+# from metadetect.metadetect import do_metadetect
+import metadetect
+
+SCALE = 0.263
+
+
+def get_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', required=True)
+    parser.add_argument('--seed', type=int, required=True)
+    parser.add_argument('--output', required=True)
+    parser.add_argument('--ntrial', type=int, default=1)
+    parser.add_argument('--noise', type=float, default=1.0e-8)
+    return parser.parse_args()
+
+
+def main():
+    args = get_args()
+
+    config = read_config(args.config)
+    metacal_psf = get_metacal_psf(config['metacal_psf'])
+
+    wcs = galsim.JacobianWCS(SCALE, 0, 0, SCALE)
+
+    sim_rng = np.random.RandomState(args.seed)
+    mcal_rng = np.random.RandomState(sim_rng.randint(0, 2**20))
+
+    # We will measure moments with a fixed gaussian weight function
+    weight_fwhm = 1.2
+    # fitter = ngmix.gaussmom.GaussMom(fwhm=weight_fwhm)
+    psf_fitter = ngmix.gaussmom.GaussMom(fwhm=weight_fwhm)
+
+    # these "runners" run the measurement code on observations
+    psf_runner = ngmix.runners.PSFRunner(fitter=psf_fitter)
+    # runner = ngmix.runners.Runner(fitter=fitter)
+
+    # this "bootstrapper" runs the metacal image shearing as well as both psf
+    # and object measurements
+    # boot = ngmix.metacal.MetacalBootstrapper(
+    #     runner=runner, psf_runner=psf_runner,
+    #     rng=mcal_rng,
+    #     psf=metacal_psf,
+    #     types=['noshear', '1p', '1m'],
+    # )
+    dlist = []
+
+    mdet_config = {
+        'metacal': {
+            'psf': metacal_psf,
+            'types': ['noshear', '1p', '1m'],
+        },
+        'meds': {
+            'min_box_size': 48,
+            'max_box_size': 48,
+
+            'box_type': 'iso_radius',
+
+            'rad_min': 4,
+            'rad_fac': 2,
+            'box_padding': 2,
+        },
+        'model': 'wmom',
+        'weight': {'fwhm': weight_fwhm},
+    }
+
+    psf_data = np.zeros(args.ntrial, dtype=[('psf_s2n', 'f4')])
+    for i in trange(args.ntrial):
+        im, psf_im, obs = make_data(
+            config=config,
+            rng=sim_rng,
+            wcs=wcs,
+            noise=args.noise
+        )
+        obslist = ngmix.ObsList()
+        obslist.append(obs)
+        mbobs = ngmix.MultiBandObsList()
+        mbobs.append(obslist)
+
+        psf_res = psf_runner.go(obs)
+        psf_data['psf_s2n'][i] = psf_res['s2n']
+
+        # resdict = do_metadetect(
+        #     mdet_config,
+        #     mbobs=mbobs,
+        #     rng=mcal_rng,
+        #     show=True,
+        # )
+        md = metadetect.Metadetect(
+            config=mdet_config,
+            mbobs=mbobs,
+            rng=mcal_rng,
+            # show=True,
+        )
+        md.go()
+        resdict = md.result
+
+        if False:
+            import matplotlib.pyplot as mplt
+            fig, ax = mplt.subplots()
+            ax.imshow(
+                md._mcalpsf_data_cache[None]['mcal_res']['noshear'][0][0].image
+            )
+            ax.scatter(
+                resdict['noshear']['sx_col'],
+                resdict['noshear']['sx_row'],
+            )
+            mplt.show()
+        # import IPython
+        # IPython.embed()
+
+        for stype, sres in resdict.items():
+            st = convert_struct(res=sres, shear_type=stype)
+            dlist.append(st)
+
+        # resdict, obsdict = boot.go(obs)
+        # for stype, sres in resdict.items():
+        #     st = make_struct(res=sres, obs=obsdict[stype], shear_type=stype)
+        #     dlist.append(st)
+
+    psf_s2n = psf_data['psf_s2n'].mean()
+    print(f'psf s/n: {psf_s2n:g}')
+
+    data = eu.numpy_util.combine_arrlist(dlist)
+    print('writing:', args.output)
+    with fitsio.FITS(args.output, 'rw', clobber=True) as fits:
+        fits.write(data, extname='object_data')
+        fits.write(psf_data, extname='psf_data')
+
+
+def make_struct(res, obs, shear_type):
+    """
+    make the data structure
+    Parameters
+    ----------
+    res: dict
+        With keys 's2n', 'e', and 'T'
+    obs: ngmix.Observation
+        The observation for this shear type
+    shear_type: str
+        The shear type
+    Returns
+    -------
+    1-element array with fields
+    """
+    dt = [
+        ('flags', 'i4'),
+        ('shear_type', 'U7'),
+        ('s2n', 'f4'),
+        ('g', 'f8', 2),
+        ('T', 'f4'),
+        ('Tpsf', 'f4'),
+        # ('psf_s2n', 'f4'),
+    ]
+    data = np.zeros(1, dtype=dt)
+    data['shear_type'] = shear_type
+    data['flags'] = res['flags']
+    if res['flags'] == 0:
+        data['s2n'] = res['s2n']
+        # for moments we are actually measureing e, the elliptity
+        data['g'] = res['e']
+        data['T'] = res['T']
+    else:
+        data['s2n'] = np.nan
+        data['g'] = np.nan
+        data['T'] = np.nan
+        data['Tpsf'] = np.nan
+    # we only have one epoch and band, so we can get the psf T from the
+    # observation rather than averaging over epochs/bands
+    data['Tpsf'] = obs.psf.meta['result']['T']
+    return data
+
+
+def convert_struct(res, shear_type):
+    """
+    make the data structure
+
+    Parameters
+    ----------
+    res: dict
+        With keys 's2n', 'e', and 'T'
+    shear_type: str
+        The shear type
+    Returns
+    -------
+    1-element array with fields
+    """
+    dt = [
+        ('flags', 'i4'),
+        ('shear_type', 'U7'),
+        ('s2n', 'f4'),
+        ('g', 'f8', 2),
+        ('T', 'f4'),
+        ('T_ratio', 'f4'),
+        # ('psf_s2n', 'f4'),
+    ]
+    data = np.zeros(res.size, dtype=dt)
+
+    data['s2n'] = np.nan
+    data['g'] = np.nan
+    data['T'] = np.nan
+    data['T_ratio'] = np.nan
+
+    data['shear_type'] = shear_type
+    data['flags'] = res['wmom_flags']
+
+    w, = np.where(res['flags'] == 0)
+    if w.size > 0:
+        data['s2n'][w] = res['wmom_s2n'][w]
+        data['g'][w] = res['wmom_g'][w]
+        data['T'][w] = res['wmom_T'][w]
+        data['T_ratio'][w] = res['wmom_T_ratio'][w]
+
+    return data
+
+
+def make_data(config, rng, noise, wcs):
+    """
+    simulate an exponential object with moffat psf
+    the hlr of the exponential is drawn from a gaussian
+    with mean 0.4 arcseconds and sigma 0.2
+    Parameters
+    ----------
+    rng: np.random.RandomState
+        The random number generator
+    noise: float
+        Noise for the image
+    Returns
+    -------
+    ngmix.Observation
+    """
+
+    stamp_size = 48
+    psf_stamp_size = 25
+
+    gal_hlr = 0.5
+
+    psf = get_psf(config['psf'], rng)
+    dx, dy = rng.uniform(low=-SCALE/2, high=SCALE/2, size=2)
+    obj0 = galsim.Exponential(
+        half_light_radius=gal_hlr,
+    ).shift(
+        dx=dx,
+        dy=dy,
+    ).shear(
+        g1=config['shear'][0],
+        g2=config['shear'][1],
+    )
+    obj = galsim.Convolve(psf, obj0)
+
+    psf_im = psf.drawImage(nx=psf_stamp_size, ny=psf_stamp_size, wcs=wcs).array
+
+    im = obj.drawImage(nx=stamp_size, ny=stamp_size, wcs=wcs).array
+
+    psf_im += rng.normal(scale=config['psf']['noise'], size=psf_im.shape)
+    im += rng.normal(scale=noise, size=im.shape)
+
+    cen = (np.array(im.shape)-1.0)/2.0
+    psf_cen = (np.array(psf_im.shape)-1.0)/2.0
+
+    jacobian = ngmix.Jacobian(
+        x=cen[1], y=cen[0], wcs=wcs.jacobian(
+            image_pos=galsim.PositionD(cen[1], cen[0])
+        ),
+    )
+    psf_jacobian = ngmix.Jacobian(
+        x=psf_cen[1], y=psf_cen[0], wcs=wcs.jacobian(
+            image_pos=galsim.PositionD(psf_cen[1], psf_cen[0])
+        ),
+    )
+
+    wt = im*0 + 1.0/noise**2
+    psf_wt = psf_im*0 + 1.0/config['psf']['noise']**2
+    psf_obs = ngmix.Observation(
+        psf_im,
+        weight=psf_wt,
+        jacobian=psf_jacobian,
+    )
+    obs = ngmix.Observation(
+        im,
+        weight=wt,
+        bmask=np.zeros(im.shape, dtype='i2'),
+        ormask=np.zeros(im.shape, dtype='i2'),
+        jacobian=jacobian,
+        psf=psf_obs,
+    )
+    return im, psf_im, obs
+
+
+def get_psf(config, rng):
+
+    while True:
+        g1, g2 = rng.normal(loc=config['gmean'], scale=config['gstd'])
+        gtot = np.sqrt(g1**2 + g2**2)
+        if gtot < 1:
+            break
+
+    if config['type'] == 'moffat':
+        psf = galsim.Moffat(
+            beta=config['beta'],
+            fwhm=config['fwhm'],
+        )
+    else:
+        raise ValueError(f'bad psf: {config["type"]}')
+
+    psf = psf.shear(
+        g1=g1,
+        g2=g2,
+    )
+    return psf
+
+
+def get_metacal_psf(config):
+    psf = config['type']
+    if psf == 'galsim_obj':
+        psf = galsim.Gaussian(fwhm=config['fwhm'])
+
+    return psf
+
+
+def read_config(fname):
+    import yaml
+    with open(fname) as fobj:
+        data = yaml.safe_load(fobj)
+    return data
+
+
+if __name__ == '__main__':
+    main()
