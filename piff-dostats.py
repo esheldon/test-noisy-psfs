@@ -25,18 +25,26 @@ for i, band in enumerate(['g', 'r', 'i', 'z']):
     fname = f's2n-{band}band.fits'
     print(fname)
     t = fitsio.read(fname)
+
     print('s2n sum')
     eu.stat.print_stats(t['s2n_sum'])
+
     print('s2n mom')
     eu.stat.print_stats(t['s2n_mom'])
 
+    print('s2n mom_fitvar')
+    eu.stat.print_stats(t['s2n_mom_fitvar'])
+
     mom_stats = eu.stat.get_stats(t['s2n_mom'])
     sum_stats = eu.stat.get_stats(t['s2n_sum'])
+    mom_fitvar_stats = eu.stat.get_stats(t['s2n_mom_fitvar'])
 
-    mom_text = r'mom S/N: %d $\pm$ %d' % (mom_stats['mean'], mom_stats['err'])
-    sum_text = r'sum S/N: %d $\pm$ %d' % (sum_stats['mean'], sum_stats['err'])
-    ax.text(1250, 140, sum_text)
-    ax.text(1250, 125, mom_text)
+    sum_text = r'sum $\mu: %d~\sigma: %d$' % (sum_stats['mean'], sum_stats['std'])  # noqa
+    mom_text = r'mom $\mu: %d~\sigma: %d$' % (mom_stats['mean'], mom_stats['std'])  # noqa
+    mom_fitvar_text = r'mom fitvar: $\mu: %d~\sigma: %d$' % (mom_fitvar_stats['mean'], mom_fitvar_stats['std'])  # noqa
+    ax.text(1000, 140, sum_text)
+    ax.text(1000, 125, mom_text)
+    ax.text(1000, 110, mom_fitvar_text)
 
     ax.hist(
         t['s2n_sum'],
@@ -47,6 +55,12 @@ for i, band in enumerate(['g', 'r', 'i', 'z']):
     ax.hist(
         t['s2n_mom'],
         label='gauss mom',
+        alpha=0.5,
+        bins=bins,
+    )
+    ax.hist(
+        t['s2n_mom_fitvar'],
+        label='gauss mom fitvar',
         alpha=0.5,
         bins=bins,
     )
