@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 import numpy as np
 import esutil as eu
 import fitsio
@@ -7,6 +8,7 @@ import argparse
 from tqdm import trange
 # from metadetect.metadetect import do_metadetect
 import metadetect
+from functools import lru_cache
 
 SCALE = 0.263
 
@@ -254,11 +256,24 @@ def make_data(config, rng, noise, wcs):
     )
     obj = galsim.Convolve(psf, obj0)
 
-    psf_im = psf.drawImage(nx=psf_stamp_size, ny=psf_stamp_size, wcs=wcs).array
+    if 'offset_sigma' in config['psf']:
+        psf_dx, psf_dy = rng.normal(
+            scale=config['psf']['offset_sigma'], size=2,
+        )
+        psf_draw = psf.shift(dx=dx, dy=dy)
+    else:
+        psf_draw = psf
+
+    psf_im = psf_draw.drawImage(
+        nx=psf_stamp_size, ny=psf_stamp_size, wcs=wcs
+    ).array
 
     im = obj.drawImage(nx=stamp_size, ny=stamp_size, wcs=wcs).array
 
-    psf_im += rng.normal(scale=config['psf']['noise'], size=psf_im.shape)
+    psf_noise = get_psf_noise(config['psf'], rng, psf_im.shape)
+    psf_noise_im = rng.normal(scale=psf_noise, size=psf_im.shape)
+
+    psf_im += psf_noise_im
     im += rng.normal(scale=noise, size=im.shape)
 
     cen = (np.array(im.shape)-1.0)/2.0
@@ -276,7 +291,7 @@ def make_data(config, rng, noise, wcs):
     )
 
     wt = im*0 + 1.0/noise**2
-    psf_wt = psf_im*0 + 1.0/config['psf']['noise']**2
+    psf_wt = psf_im*0 + 1.0/psf_noise**2
     psf_obs = ngmix.Observation(
         psf_im,
         weight=psf_wt,
@@ -291,6 +306,22 @@ def make_data(config, rng, noise, wcs):
         psf=psf_obs,
     )
     return im, psf_im, obs
+
+
+def get_psf_noise(config, rng, shape):
+    if isinstance(config['noise'], str):
+        s2ns = read_psf_s2ns(config['noise'])
+        ind = rng.randint(0, s2ns.size)
+        noise = 0.00136 * 100 / s2ns['s2n_mom'][ind]
+    else:
+        noise = config['noise']
+
+    return noise
+
+
+@lru_cache
+def read_psf_s2ns(fname):
+    return fitsio.read(fname)
 
 
 def get_psf(config, rng):
@@ -313,6 +344,7 @@ def get_psf(config, rng):
         g1=g1,
         g2=g2,
     )
+
     return psf
 
 

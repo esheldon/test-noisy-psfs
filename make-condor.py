@@ -40,7 +40,7 @@ export OMP_NUM_THREADS=1
 
 seed=$1
 
-python /astro/u/esheldon/lensing/test-noisy-psf/test.py \
+~/git/test-noisy-psfs/test-noisy-psfs \
     --seed ${seed} \
     --ntrial %(ntrial)d \
     --output %(front)s-${seed}.fits \
@@ -52,7 +52,7 @@ def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
     parser.add_argument('--seed', type=int, required=True)
-    parser.add_argument('--ntrial', type=int, default=10000)
+    parser.add_argument('--ntrial', type=int, default=1000)
     parser.add_argument('--njobs', type=int, default=1000)
     return parser.parse_args()
 

@@ -69,6 +69,6 @@ for i, band in enumerate(['g', 'r', 'i', 'z']):
         ax.legend(loc='lower right')
 
 print('writing:', png)
-mplt.savefig(png)
+mplt.savefig(png, dpi=150)
 print('writing:', pdf)
 mplt.savefig(pdf)
